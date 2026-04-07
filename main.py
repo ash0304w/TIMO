@@ -15,6 +15,10 @@ from datasets.utils import build_data_loader
 import clip
 from utils import *
 from models import *
+from unifsl_rl.config import RLConfig
+from unifsl_rl.methods.timo.adapter import TIMOAdapter
+from unifsl_rl.train import train_rl
+from unifsl_rl.infer import eval_rl, probe_rl
 
 
 def get_arguments():
@@ -24,6 +28,20 @@ def get_arguments():
     parser.add_argument('--seed', dest='seed', type=int, default=1, help='seed')
     parser.add_argument('--dbg', dest='dbg', type=float, default=0, help='debug mode')
     parser.add_argument('--config', dest='config', help='settings of Tip-Adapter in yaml format')
+    parser.add_argument('--use_rl', type=int, default=0)
+    parser.add_argument('--rl_mode', type=str, default='none', choices=['none', 'train', 'eval', 'probe'])
+    parser.add_argument('--rl_ckpt', type=str, default='')
+    parser.add_argument('--rl_train_episodes', type=int, default=50)
+    parser.add_argument('--rl_lr', type=float, default=1e-3)
+    parser.add_argument('--rl_budget', type=int, default=2)
+    parser.add_argument('--rl_trials', type=int, default=1)
+    parser.add_argument('--rl_cost_lambda', type=float, default=0.01)
+    parser.add_argument('--rl_violation_lambda', type=float, default=0.1)
+    parser.add_argument('--rl_align_lambda', type=float, default=0.0)
+    parser.add_argument('--rl_anom_lambda', type=float, default=0.0)
+    parser.add_argument('--rl_seed', type=int, default=1)
+    parser.add_argument('--rl_device', type=str, default='cuda')
+    parser.add_argument('--save_rl_outputs', type=int, default=1)
     args = parser.parse_args()
     return args
 
@@ -38,6 +56,7 @@ def main():
     cfg['shots'] = args.shot
     cfg['seed'] = args.seed
     cfg['dbg'] = args.dbg
+    cfg['use_rl'] = args.use_rl
     print("shots", cfg['shots'])
     print("seed", cfg['seed'])
     print("dbg", cfg['dbg'])
@@ -79,6 +98,43 @@ def main():
     else:
         test_features, test_labels = loda_val_test_feature(cfg, "test")
 
+
+    # ------------------------------------------ RL path ------------------------------------------
+    if args.use_rl == 1:
+        rl_cfg = RLConfig(
+            mode=args.rl_mode,
+            train_episodes=args.rl_train_episodes,
+            lr=args.rl_lr,
+            budget=args.rl_budget,
+            trials=args.rl_trials,
+            cost_lambda=args.rl_cost_lambda,
+            violation_lambda=args.rl_violation_lambda,
+            align_lambda=args.rl_align_lambda,
+            anom_lambda=args.rl_anom_lambda,
+            seed=args.rl_seed,
+            device=args.rl_device,
+            ckpt=args.rl_ckpt,
+        )
+        adapter = TIMOAdapter(cfg, device=rl_cfg.device)
+        if rl_cfg.mode == 'train':
+            ckpt_path, _ = train_rl(adapter, rl_cfg)
+            print(f"[RL] checkpoint: {ckpt_path}")
+            if args.save_rl_outputs:
+                with open('outputs/UniFSL_RL_train.txt', 'a') as f:
+                    f.write(f"{cfg['dataset']}_{cfg['shots']}_{cfg['seed']}: ckpt={ckpt_path}\n")
+        elif rl_cfg.mode == 'eval':
+            test_acc, step = eval_rl(adapter, rl_cfg)
+            print(f"[RL-EVAL] test_acc={test_acc:.2f}")
+            print(f"[RL-EVAL] chosen alpha={step.actions['alpha']} beta={step.actions['beta']} gamma={step.actions['gamma']} subset={step.actions.get('subset').tolist() if step.actions.get('subset') is not None else None}")
+            print(f"[RL-EVAL] reward={step.reward:.4f} cost={step.actions['beta']} violation={step.report['stage0'].violation + step.report['stage1'].violation} repair={step.report['stage0'].repaired or step.report['stage1'].repaired} protocol=eval ckpt={rl_cfg.ckpt}")
+        elif rl_cfg.mode == 'probe':
+            test_acc, step = probe_rl(adapter, rl_cfg)
+            print(f"[RL-PROBE] test_acc={test_acc:.2f}")
+            print(f"[RL-PROBE] chosen alpha={step.actions['alpha']} beta={step.actions['beta']} gamma={step.actions['gamma']} subset={step.actions.get('subset').tolist() if step.actions.get('subset') is not None else None}")
+            print(f"[RL-PROBE] reward={step.reward:.4f} cost={step.actions['beta']} violation={step.report['stage0'].violation + step.report['stage1'].violation} repair={step.report['stage0'].repaired or step.report['stage1'].repaired} protocol=probe ckpt={rl_cfg.ckpt}")
+        else:
+            raise ValueError("--use_rl=1 时必须指定 --rl_mode train/eval/probe")
+        return
 
     # ------------------------------------------ Fusion ------------------------------------------
     

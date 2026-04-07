@@ -1,4 +1,5 @@
 from utils import *
+from unifsl_rl.methods.timo.ops import select_tgi_prompts, build_tgi_transfer_set
 
 # ------------------------------------------ Training Free ------------------------------------------
 def run_tip_adapter(cfg, cache_keys, cache_values, val_features, val_labels, test_features, test_labels, clip_weights):
@@ -237,19 +238,19 @@ def TIMO(cfg, val_features, val_labels, test_features, test_labels,
         for beta in beta_list:
             beta = beta + 1 if beta == 0 else beta
             
-            sliced_vecs_t = vecs_t.repeat(1,2,1)[:,:beta,:] # c, s, d
-            sliced_weights = weights.repeat(1,2)[:,:beta] # c, s
-                
-            # weight for instance based transfer
-            sliced_vecs_t = sliced_vecs_t * sliced_weights.unsqueeze(-1) 
-            
-            sliced_vecs_t = sliced_vecs_t.reshape(cate_num*beta, -1)
-            tmp = torch.tensor(range(cate_num)).unsqueeze(1).repeat(1, beta)
-            sliced_labels_t = tmp.flatten().to(sliced_vecs_t.device)
-            
-            # Instance based transfer
-            vecs_c = torch.cat([sliced_vecs_t, vecs_v])
-            labels_c = torch.cat([sliced_labels_t, labels_v])
+            selected = select_tgi_prompts(
+                clip_weights_all.clone().float(),
+                matching_score,
+                beta=beta,
+                subset_scores=None,
+                mode="paper",
+            )
+            vecs_c, labels_c = build_tgi_transfer_set(
+                selected["selected_vecs"],
+                selected["selected_weights"],
+                vecs_v,
+                labels_v,
+            )
 
             
             alpha, W, b, val_acc = GDA(vecs_c, labels_c, clip_weights, val_features, val_labels, alpha_shift=True)
