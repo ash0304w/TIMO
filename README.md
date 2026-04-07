@@ -85,3 +85,20 @@ This repo is build upon previous amazing repos include [TIP-Adapter](https://git
   year={2024}
 }
 ```
+
+## UniFSL-RL-Pure (for TIMO)
+
+本仓库新增了统一 RL 控制路径（保持原 TIMO/TIMO-S paper 路径不变）：
+
+```bash
+# 训练（仅使用缓存特征，不重复 CLIP 编码）
+python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --use_rl 1 --rl_mode train
+
+# 评估（一次前向决策）
+python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --use_rl 1 --rl_mode eval --rl_ckpt <ckpt_path>
+
+# Probe（budgeted refinement，reward 仅基于 support LOO）
+python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --use_rl 1 --rl_mode probe --rl_ckpt <ckpt_path> --rl_budget 2
+```
+
+新增参数：`--use_rl --rl_mode --rl_ckpt --rl_train_episodes --rl_lr --rl_budget --rl_trials --rl_cost_lambda --rl_violation_lambda --rl_align_lambda --rl_anom_lambda --rl_seed --rl_device --save_rl_outputs`。
