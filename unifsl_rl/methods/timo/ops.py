@@ -35,6 +35,40 @@ def sort_prompt_bank(vecs_t, matching_score):
     return vec_sort(vecs_t, matching_score)
 
 
+# ---------------------- Backward-compatible wrappers ----------------------
+# models.py currently imports these names directly. Keep them to avoid
+# breaking the original paper path import chain.
+def select_tgi_prompts(vecs_t, matching_score, beta, subset_scores=None, mode="paper"):
+    sorted_vecs, sorted_weights = sort_prompt_bank(vecs_t, matching_score)
+    prompt_num = sorted_vecs.shape[1]
+    beta = max(1, min(int(beta), prompt_num))
+    if mode == "paper" or subset_scores is None:
+        return {
+            "selected_vecs": sorted_vecs[:, :beta, :],
+            "selected_weights": sorted_weights[:, :beta],
+            "subset_idx": list(range(beta)),
+        }
+
+    # RL/custom subset path
+    idx = torch.topk(subset_scores, k=beta).indices
+    idx = idx.sort().values
+    return {
+        "selected_vecs": vecs_t[:, idx, :],
+        "selected_weights": matching_score[:, idx],
+        "subset_idx": idx.tolist(),
+    }
+
+
+def build_tgi_transfer_set(selected_prompts, selected_weights, support_vecs, support_labels):
+    c, beta, _ = selected_prompts.shape
+    weighted_prompts = selected_prompts * selected_weights.unsqueeze(-1)
+    text_vecs = weighted_prompts.reshape(c * beta, -1)
+    text_labels = torch.arange(c, device=text_vecs.device).unsqueeze(1).repeat(1, beta).flatten().float()
+    vecs = torch.cat([text_vecs, support_vecs.float()])
+    labels = torch.cat([text_labels, support_labels.float()])
+    return vecs, labels
+
+
 def build_prefix_subset(prompt_num, beta):
     b = max(1, min(int(beta), int(prompt_num)))
     return list(range(b))
