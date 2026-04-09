@@ -28,17 +28,17 @@ class TIMOAdapter(MethodWrapper):
         cfg = cfg or self.cfg
         clip_weights_all = torch.load(cfg["cache_dir"] + "/text_weights_cupl_t_all.pt", weights_only=False).float().to(self.device)
         cache_keys, cache_values = load_few_shot_feature(cfg)
-        cache_keys = cache_keys.to(self.device)
-        cache_values = cache_values.to(self.device)
+        cache_keys = cache_keys.to(self.device).float()
+        cache_values = cache_values.to(self.device).float()
         support_vecs = torch.load(cfg["cache_dir"] + "/" + f"{cfg['shots']}_vecs_f.pt", weights_only=False).float().to(self.device)
         support_labels = torch.load(cfg["cache_dir"] + "/" + f"{cfg['shots']}_labels_f.pt", weights_only=False).float().to(self.device)
         val_features, val_labels = loda_val_test_feature(cfg, "val")
-        val_features, val_labels = val_features.to(self.device), val_labels.to(self.device)
+        val_features, val_labels = val_features.to(self.device).float(), val_labels.to(self.device)
         if cfg["dataset"] == "imagenet":
             test_features, test_labels = val_features, val_labels
         else:
             test_features, test_labels = loda_val_test_feature(cfg, "test")
-            test_features, test_labels = test_features.to(self.device), test_labels.to(self.device)
+            test_features, test_labels = test_features.to(self.device).float(), test_labels.to(self.device)
 
         image_prototypes = build_image_prototypes(cache_keys, cache_values)
         cate_num, prompt_num, _ = clip_weights_all.shape
