@@ -68,3 +68,18 @@ def probe_safe(adapter, rl_cfg, strict=False):
         "violation": best["chosen"].violation,
     })
     return best
+
+
+# ---------------------- backward-compatible aliases ----------------------
+def eval_rl(adapter, rl_cfg):
+    """Compatibility alias for older main.py imports."""
+    res = eval_safe_or_strict(adapter, rl_cfg, strict=False)
+    chosen = res["chosen"]
+    return chosen.selection_score * 100.0, res
+
+
+def probe_rl(adapter, rl_cfg):
+    """Compatibility alias for older main.py imports."""
+    res = probe_safe(adapter, rl_cfg, strict=False)
+    chosen = res["chosen"]
+    return chosen.selection_score * 100.0, res
