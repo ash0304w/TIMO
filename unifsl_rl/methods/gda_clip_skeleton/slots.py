@@ -1,0 +1,2 @@
+class GDAClipAlphaSlot:
+    pass
