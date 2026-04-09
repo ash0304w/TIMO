@@ -1,51 +1,70 @@
-import torch
+import os
 
-from unifsl_rl.core.action_spec import CompositeActionSpec
-from unifsl_rl.core.conflict_checker import check_slot_conflicts
-from unifsl_rl.core.controller import RLCoordinator
-from unifsl_rl.core.policy_factory import build_policy
-from unifsl_rl.core.protocol import EVAL_PROTOCOL, PROBE_PROTOCOL
-from unifsl_rl.core.reward import RewardWeights, compute_reward
-from unifsl_rl.core.state_builder import JointStateBuilder
-from unifsl_rl.methods.timo.probe import run_probe
+from unifsl_rl.core.incumbent import IncumbentProvider
+from unifsl_rl.core.protocol import OFFLINE_EVAL_PROTOCOL, STRICT_RL_PROTOCOL, TEST_TIME_PROBE_PROTOCOL
+from unifsl_rl.methods.timo.infer_safe import run_safe_inference
+from unifsl_rl.methods.timo.logs import append_csv, dump_candidate_pool, dump_final_json, ensure_dir, write_run_readme
+from unifsl_rl.methods.timo.train_safe_rl import ResidualPolicy, load_policy
 
 
-def _build_runtime(adapter, protocol, rl_cfg, ckpt_path):
+def eval_joint_exact(adapter, cfg):
     cache = adapter.build_cache()
-    slots = [s for s in adapter.get_slots(cache)]
-    check_slot_conflicts(slots)
-    spec0 = CompositeActionSpec({"gamma": slots[0].action_spec, "beta": slots[1].action_spec, "subset_scores": slots[2].action_spec})
-    spec1 = CompositeActionSpec({"alpha": slots[3].action_spec})
-
-    policy0 = build_policy(64, spec0).to(adapter.device)
-    policy1 = build_policy(64, spec1).to(adapter.device)
-    ckpt = torch.load(ckpt_path, map_location=adapter.device, weights_only=False)
-    policy0.load_state_dict(ckpt["policy0"])
-    policy1.load_state_dict(ckpt["policy1"])
-
-    weights = RewardWeights(
-        align_lambda=rl_cfg.align_lambda,
-        anom_lambda=rl_cfg.anom_lambda,
-        cost_lambda=rl_cfg.cost_lambda,
-        violation_lambda=rl_cfg.violation_lambda,
-    )
-    coordinator = RLCoordinator(adapter, slots, policy0, policy1, JointStateBuilder(slots, 64), protocol, compute_reward, weights, budget=rl_cfg.budget)
-    return cache, coordinator
+    ctx = adapter.build_context(cache, OFFLINE_EVAL_PROTOCOL)
+    inc = IncumbentProvider(adapter)
+    joint = inc.get_joint_exact_incumbent(ctx)
+    return joint
 
 
-def eval_rl(adapter, rl_cfg):
-    cache, coordinator = _build_runtime(adapter, EVAL_PROTOCOL, rl_cfg, rl_cfg.ckpt)
-    ctx = adapter.build_context(cache, EVAL_PROTOCOL, split="test")
-    step = coordinator.decide_and_run(ctx)
-    test_acc = (step.run_output["logits_final"].argmax(-1) == ctx["eval_labels"]).float().mean().item() * 100.0
-    return test_acc, step
+def eval_safe_or_strict(adapter, rl_cfg, strict=False):
+    cache = adapter.build_cache()
+    protocol = STRICT_RL_PROTOCOL if strict else OFFLINE_EVAL_PROTOCOL
+    ctx = adapter.build_context(cache, protocol)
+
+    policy = ResidualPolicy(state_dim=96, subset_candidates=max(16, rl_cfg.swap_window * 4)).to(adapter.device)
+    load_policy(policy, rl_cfg.ckpt, adapter.device)
+
+    res = run_safe_inference(adapter, ctx, protocol, policy, rl_cfg, strict_rl=strict)
+    out_dir = os.path.join("outputs", "unifsl_rl", adapter.cfg["dataset"], f"{adapter.cfg['shots']}shot_seed{adapter.cfg['seed']}")
+    ensure_dir(out_dir)
+    if rl_cfg.dump_candidate_pool:
+        dump_candidate_pool(os.path.join(out_dir, "candidate_pool.jsonl"), res["verified"].ranked)
+    chosen = res["chosen"]
+    inc = res["safe_inc"]
+    row = {
+        "raw_selection_acc": chosen.selection_score,
+        "incumbent_acc": inc.selection_score,
+        "delta_acc": chosen.selection_score - inc.selection_score,
+        "reward": (chosen.selection_score - inc.selection_score) - rl_cfg.rl_cost_lambda * chosen.cost - rl_cfg.rl_violation_lambda * chosen.violation,
+        "cost": chosen.cost,
+        "violation": chosen.violation,
+        "source_tag": chosen.source_tag,
+    }
+    append_csv(os.path.join(out_dir, "eval_log.csv"), row)
+    dump_final_json(os.path.join(out_dir, "final_decision.json"), row)
+    write_run_readme(os.path.join(out_dir, "README_run.md"), f"mode={'strict_rl' if strict else 'safe_rl'}")
+    return res
 
 
-def probe_rl(adapter, rl_cfg):
-    cache, coordinator = _build_runtime(adapter, PROBE_PROTOCOL, rl_cfg, rl_cfg.ckpt)
-    ctx = adapter.build_context(cache, PROBE_PROTOCOL, split="support")
-    step = run_probe(adapter, coordinator, ctx, budget=rl_cfg.budget)
+def probe_safe(adapter, rl_cfg, strict=False):
+    cache = adapter.build_cache()
+    ctx = adapter.build_context(cache, TEST_TIME_PROBE_PROTOCOL)
+    policy = ResidualPolicy(state_dim=96, subset_candidates=max(16, rl_cfg.swap_window * 4)).to(adapter.device)
+    load_policy(policy, rl_cfg.ckpt, adapter.device)
 
-    final_actions = step.actions
-    test_acc, _ = adapter.run_final_inference(cache, final_actions)
-    return test_acc, step
+    best = None
+    for _ in range(max(1, rl_cfg.rl_budget)):
+        res = run_safe_inference(adapter, ctx, TEST_TIME_PROBE_PROTOCOL, policy, rl_cfg, strict_rl=strict)
+        chosen = res["chosen"]
+        if best is None or chosen.selection_score > best["chosen"].selection_score:
+            best = res
+    out_dir = os.path.join("outputs", "unifsl_rl", adapter.cfg["dataset"], f"{adapter.cfg['shots']}shot_seed{adapter.cfg['seed']}")
+    ensure_dir(out_dir)
+    append_csv(os.path.join(out_dir, "probe_log.csv"), {
+        "raw_selection_acc": best["chosen"].selection_score,
+        "incumbent_acc": best["safe_inc"].selection_score,
+        "delta_acc": best["chosen"].selection_score - best["safe_inc"].selection_score,
+        "reward": best["chosen"].selection_score - best["safe_inc"].selection_score,
+        "cost": best["chosen"].cost,
+        "violation": best["chosen"].violation,
+    })
+    return best

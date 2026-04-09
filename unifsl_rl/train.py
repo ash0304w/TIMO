@@ -2,57 +2,60 @@ import os
 
 import torch
 
-from unifsl_rl.core.action_spec import CompositeActionSpec
-from unifsl_rl.core.conflict_checker import check_slot_conflicts
-from unifsl_rl.core.controller import RLCoordinator
-from unifsl_rl.core.policy_factory import build_policy
-from unifsl_rl.core.protocol import TRAIN_PROTOCOL
-from unifsl_rl.core.reward import RewardWeights, compute_reward
-from unifsl_rl.core.state_builder import JointStateBuilder
+from unifsl_rl.core.incumbent import IncumbentProvider
+from unifsl_rl.core.protocol import OFFLINE_TRAIN_PROTOCOL
+from unifsl_rl.methods.timo.infer_safe import run_safe_inference
+from unifsl_rl.methods.timo.logs import append_csv, dump_final_json, ensure_dir, write_run_readme
+from unifsl_rl.methods.timo.subset_candidates import make_subset_candidates
+from unifsl_rl.methods.timo.train_imitation import run_imitation
+from unifsl_rl.methods.timo.train_safe_rl import ResidualPolicy, save_policy
 
 
 def train_rl(adapter, rl_cfg):
     cache = adapter.build_cache()
-    slots = [s for s in adapter.get_slots(cache)]
-    check_slot_conflicts(slots)
+    ctx = adapter.build_context(cache, OFFLINE_TRAIN_PROTOCOL)
+    out_dir = os.path.join("outputs", "unifsl_rl", adapter.cfg["dataset"], f"{adapter.cfg['shots']}shot_seed{adapter.cfg['seed']}")
+    ensure_dir(out_dir)
 
-    spec0 = CompositeActionSpec({
-        "gamma": slots[0].action_spec,
-        "beta": slots[1].action_spec,
-        "subset_scores": slots[2].action_spec,
-    })
-    spec1 = CompositeActionSpec({"alpha": slots[3].action_spec})
+    policy = ResidualPolicy(state_dim=96, subset_candidates=max(16, rl_cfg.swap_window * 4)).to(adapter.device)
+    opt = torch.optim.Adam(policy.parameters(), lr=rl_cfg.rl_lr)
 
-    state_builder = JointStateBuilder(slots=slots, fixed_dim=64)
-    policy0 = build_policy(64, spec0).to(adapter.device)
-    policy1 = build_policy(64, spec1).to(adapter.device)
+    # Stage-1 imitation (single task fallback)
+    inc_provider = IncumbentProvider(adapter)
+    safe_inc = inc_provider.get_safe_incumbent(ctx)
+    state = adapter.build_state(ctx, safe_inc, OFFLINE_TRAIN_PROTOCOL)
+    target = {
+        "alpha_delta": torch.tensor(2, device=adapter.device),
+        "gamma_delta": torch.tensor(2, device=adapter.device),
+        "beta_delta": torch.tensor(4, device=adapter.device),
+        "subset_id": torch.tensor(0, device=adapter.device),
+    }
+    warm_ckpt = rl_cfg.warm_start_ckpt or os.path.join(out_dir, "warm_start.pt")
+    imitation_loss = run_imitation(policy, opt, [state], [target], warm_ckpt)
 
-    params = list(policy0.parameters()) + list(policy1.parameters())
-    optim = torch.optim.Adam(params, lr=rl_cfg.lr)
-    weights = RewardWeights(
-        align_lambda=rl_cfg.align_lambda,
-        anom_lambda=rl_cfg.anom_lambda,
-        cost_lambda=rl_cfg.cost_lambda,
-        violation_lambda=rl_cfg.violation_lambda,
-    )
-    coordinator = RLCoordinator(adapter, slots, policy0, policy1, state_builder, TRAIN_PROTOCOL, compute_reward, weights, budget=rl_cfg.budget)
+    # Stage-2 conservative safe RL (bandit improvement over safe incumbent)
+    train_csv = os.path.join(out_dir, "train_log.csv")
+    best_ckpt = os.path.join(out_dir, "best_safe_rl.pt")
+    best_score = -1e9
+    for ep in range(rl_cfg.rl_train_epochs):
+        res = run_safe_inference(adapter, ctx, OFFLINE_TRAIN_PROTOCOL, policy, rl_cfg, strict_rl=False)
+        chosen = res["chosen"]
+        incumbent = res["safe_inc"]
+        reward = (chosen.selection_score - incumbent.selection_score) - rl_cfg.rl_cost_lambda * chosen.cost - rl_cfg.rl_violation_lambda * chosen.violation
+        row = {
+            "epoch": ep,
+            "raw_selection_acc": chosen.selection_score,
+            "incumbent_acc": incumbent.selection_score,
+            "delta_acc": chosen.selection_score - incumbent.selection_score,
+            "reward": reward,
+            "cost": chosen.cost,
+            "violation": chosen.violation,
+        }
+        append_csv(train_csv, row)
+        if chosen.selection_score > best_score:
+            best_score = chosen.selection_score
+            save_policy(policy, best_ckpt)
 
-    logs = []
-    for ep in range(rl_cfg.train_episodes):
-        ctx = adapter.build_context(cache, TRAIN_PROTOCOL, split="val")
-        step = coordinator.decide_and_run(ctx)
-        advantage = step.reward - float(step.value.detach().cpu().item())
-        loss = -(step.log_prob * advantage) - 0.001 * step.entropy + 0.5 * (step.value - step.reward) ** 2
-
-        optim.zero_grad()
-        loss.mean().backward()
-        optim.step()
-
-        logs.append((ep, step.reward, step.actions))
-        print(f"[RL-TRAIN] ep={ep} reward={step.reward:.4f} alpha={step.actions['alpha']} beta={step.actions['beta']} gamma={step.actions['gamma']} subset={step.actions.get('subset').tolist() if step.actions.get('subset') is not None else None}")
-
-    ckpt_dir = os.path.join(adapter.cfg["cache_dir"], "rl_ckpts")
-    os.makedirs(ckpt_dir, exist_ok=True)
-    ckpt_path = os.path.join(ckpt_dir, f"unifsl_rl_{adapter.cfg['dataset']}_{adapter.cfg['shots']}shot_seed{adapter.cfg['seed']}.pt")
-    torch.save({"policy0": policy0.state_dict(), "policy1": policy1.state_dict(), "cfg": adapter.cfg, "logs": logs}, ckpt_path)
-    return ckpt_path, logs
+    dump_final_json(os.path.join(out_dir, "final_decision.json"), {"warm_start_loss": imitation_loss, "best_selection_score": best_score, "ckpt": best_ckpt})
+    write_run_readme(os.path.join(out_dir, "README_run.md"), "Safe-RL training completed with incumbent-conditioned residual proposals.")
+    return best_ckpt, {"warm_start_loss": imitation_loss, "best_selection_score": best_score}

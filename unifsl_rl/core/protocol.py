@@ -11,26 +11,7 @@ class Protocol:
     can_use_labels_for_state: bool
 
 
-TRAIN_PROTOCOL = Protocol(
-    name="train",
-    allowed_signals=["support", "val", "meta"],
-    selection_split="val",
-    can_use_labels_for_reward=True,
-    can_use_labels_for_state=False,
-)
-
-EVAL_PROTOCOL = Protocol(
-    name="eval",
-    allowed_signals=["support", "test", "meta"],
-    selection_split="test",
-    can_use_labels_for_reward=False,
-    can_use_labels_for_state=False,
-)
-
-PROBE_PROTOCOL = Protocol(
-    name="probe",
-    allowed_signals=["support", "meta"],
-    selection_split="support",
-    can_use_labels_for_reward=True,
-    can_use_labels_for_state=False,
-)
+OFFLINE_TRAIN_PROTOCOL = Protocol("offline_train", ["support", "val", "meta"], "val", True, False)
+OFFLINE_EVAL_PROTOCOL = Protocol("offline_eval", ["support", "val", "test", "meta"], "val", True, False)
+TEST_TIME_PROBE_PROTOCOL = Protocol("test_time_probe", ["support", "meta"], "support", True, False)
+STRICT_RL_PROTOCOL = Protocol("strict_rl", ["support", "val", "meta"], "val", True, False)

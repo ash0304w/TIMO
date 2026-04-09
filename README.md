@@ -102,3 +102,23 @@ python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --use_rl 1 --rl_
 ```
 
 新增参数：`--use_rl --rl_mode --rl_ckpt --rl_train_episodes --rl_lr --rl_budget --rl_trials --rl_cost_lambda --rl_violation_lambda --rl_align_lambda --rl_anom_lambda --rl_seed --rl_device --save_rl_outputs`。
+
+## Safe Unified Modes (4 modes)
+
+推荐默认使用 `safe_rl`，并保留以下模式：
+
+```bash
+# 1) 论文原始复现路径
+python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --timo_mode paper
+
+# 2) 联合精确搜索（deterministic baseline）
+python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --timo_mode joint_exact
+
+# 3) 安全 RL 训练/评估/Probe（默认推荐）
+python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --timo_mode safe_rl --rl_mode train
+python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --timo_mode safe_rl --rl_mode eval --rl_ckpt <path>
+python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --timo_mode safe_rl --rl_mode probe --rl_ckpt <path> --rl_budget 2
+
+# 4) strict_rl（仅 ablation，不推荐默认）
+python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --timo_mode strict_rl --rl_mode eval --rl_ckpt <path>
+```
