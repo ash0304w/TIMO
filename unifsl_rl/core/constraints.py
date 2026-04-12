@@ -13,37 +13,46 @@ class ConstraintEngine:
     def __init__(self, budget=2):
         self.budget = budget
 
-    def _repair_subset(self, scores, beta):
-        k = max(1, int(beta))
-        k = min(k, scores.numel())
+    def _repair_subset(self, scores, beta, prompt_num):
+        k = max(1, min(int(beta), int(prompt_num)))
         idx = torch.topk(scores, k=k).indices
-        return idx
+        idx = idx.clamp(0, prompt_num - 1).long()
+        idx = torch.unique(idx, sorted=True)
+        if idx.numel() < k:
+            fill = [i for i in range(prompt_num) if i not in set(idx.tolist())][: k - idx.numel()]
+            idx = torch.cat([idx, torch.tensor(fill, device=idx.device, dtype=torch.long)], dim=0)
+        return idx[:k]
 
     def apply(self, actions: dict, ctx: dict):
         violation = 0.0
         repaired = False
+        prompt_num = int(ctx["prompt_num"])
 
         beta = int(actions["beta"])
-        p = int(ctx["prompt_num"])
-        if beta < 1 or beta > p:
+        if beta < 1 or beta > prompt_num:
             repaired = True
             violation += 1.0
-            beta = max(1, min(beta, p))
+            beta = max(1, min(beta, prompt_num))
             actions["beta"] = beta
 
-        subset_scores = actions.get("subset_scores")
-        if subset_scores is not None:
-            subset_idx = self._repair_subset(subset_scores, beta)
-            actions["subset"] = subset_idx
-            if subset_idx.numel() != beta:
-                repaired = True
+        if "subset_scores" in actions:
+            subset_idx = self._repair_subset(actions["subset_scores"], beta, prompt_num)
+            actions["subset_indices"] = [int(i) for i in subset_idx.tolist()]
+            if len(actions["subset_indices"]) != beta:
                 violation += 1.0
+                repaired = True
 
-        actions["gamma"] = float(max(1e-4, actions["gamma"]))
-        actions["alpha"] = float(max(1e-4, actions["alpha"]))
+        gamma = float(actions.get("gamma", 1.0))
+        alpha = float(actions.get("alpha", 1.0))
+        gamma = float(max(1e-4, gamma))
+        alpha = float(max(1e-4, alpha))
+        actions["gamma"] = gamma
+        actions["alpha"] = alpha
 
         return actions, ConstraintReport(violation=violation, repaired=repaired)
 
     def cost(self, actions):
-        beta = float(actions.get("beta", 1))
-        return beta
+        return float(actions.get("beta", 1))
+
+    def violation_penalty(self, report: ConstraintReport, lam: float):
+        return lam * float(report.violation)
