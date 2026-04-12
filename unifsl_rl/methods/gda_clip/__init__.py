@@ -1,3 +1,6 @@
-from .adapter import GDAClipAdapter
+"""GDA-CLIP method package.
 
-__all__ = ["GDAClipAdapter"]
+Keep module import side-effect free to avoid circular import with `models.py`.
+"""
+
+__all__ = ["adapter", "slots"]

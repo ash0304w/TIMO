@@ -2,7 +2,6 @@ import torch
 
 from unifsl_rl.core.method_wrapper import MethodWrapper
 from unifsl_rl.core.access_guard import GuardedMapping, ensure_probe_reward_safe
-from models import GDA
 from utils import loda_val_test_feature
 from .slots import GDAAlphaSlot, GDADummyStage0Slot
 
@@ -48,6 +47,9 @@ class GDAClipAdapter(MethodWrapper):
 
     def run_with_action(self, ctx, action):
         alpha = float(action.get("alpha", 1.0))
+        # local import avoids circular import when models.py imports timo ops
+        from models import GDA
+
         _, W, b, _ = GDA(ctx["support_vecs"], ctx["support_labels"], ctx["clip_weights"], ctx["val_features"], ctx["val_labels"], alpha_shift=False)
         logits = 100.0 * ctx["val_features"].float() @ ctx["clip_weights"].float() + alpha * (ctx["val_features"].float() @ W + b)
         preds = logits.argmax(dim=-1)
