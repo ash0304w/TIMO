@@ -1,18 +1,28 @@
-from dataclasses import dataclass
+from abc import ABC, abstractmethod
 from typing import Dict, List
 
 from .action_spec import ActionSpec
 
 
-@dataclass
-class Slot:
+class Slot(ABC):
     id: str
-    owns: List[str]
-    action_spec: ActionSpec
+    stage: int = 0
 
+    @property
+    @abstractmethod
+    def owns(self) -> List[str]:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def action_spec(self) -> ActionSpec:
+        raise NotImplementedError
+
+    @abstractmethod
     def observe(self, ctx: Dict):
         raise NotImplementedError
 
+    @abstractmethod
     def apply(self, ctx: Dict, action):
         raise NotImplementedError
 
