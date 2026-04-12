@@ -1,3 +1,6 @@
-# GDA-CLIP Skeleton
+# Deprecated alias
 
-This folder is a minimal adapter skeleton demonstrating that `unifsl_rl/core` is not hard-coded to TIMO.
+This directory is kept only for backward compatibility. The real second method adapter now lives in:
+
+- `unifsl_rl/methods/gda_clip/adapter.py`
+- `unifsl_rl/methods/gda_clip/slots.py`

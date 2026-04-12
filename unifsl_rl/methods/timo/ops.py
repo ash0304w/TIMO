@@ -229,3 +229,49 @@ def evaluate_support_loo(cfg, ctx, candidate):
         )
         corr += int(acc > 0.5)
     return corr / max(1, total), {"probe_metric": "support_loo"}
+
+
+
+# --------- Phase-2 pure-RL friendly aliases ---------
+def run_igt(cfg, clip_weights_all, image_prototypes, gamma_value):
+    return build_igt_text_weights(cfg, clip_weights_all, image_prototypes, gamma_value, return_matching=True)
+
+
+def fit_gda_classifier(vecs, labels, class_num):
+    return fit_gda_from_vectors(vecs, labels, class_num)
+
+
+def run_timo_config(cfg, ctx, action, split_features, split_labels):
+    return evaluate_timo_config(
+        cfg,
+        ctx,
+        int(action["alpha_idx"]),
+        int(action["beta"]),
+        int(action["gamma_idx"]),
+        [int(i) for i in action["subset_indices"]],
+        split_features,
+        split_labels,
+    )
+
+
+def support_loo_score(cfg, ctx, action):
+    class Obj:
+        pass
+    c = Obj()
+    c.alpha_idx = int(action["alpha_idx"])
+    c.beta = int(action["beta"])
+    c.gamma_idx = int(action["gamma_idx"])
+    c.subset_indices = [int(i) for i in action["subset_indices"]]
+    return evaluate_support_loo(cfg, ctx, c)
+
+
+def build_state_stats(ctx, branch_diagnostics=None):
+    branch_diagnostics = branch_diagnostics or {}
+    prompt_num = float(ctx["prompt_num"])
+    stats = {
+        "gamma_stats": [prompt_num / 100.0, float(branch_diagnostics.get("agreement", 0.0))],
+        "beta_stats": [prompt_num / 10.0, float(branch_diagnostics.get("tgi_entropy", 0.0))],
+        "subset_stats": [float(branch_diagnostics.get("igt_margin", 0.0)), float(branch_diagnostics.get("tgi_margin", 0.0))],
+        "alpha_stats": [float(branch_diagnostics.get("agreement", 0.0)), float(branch_diagnostics.get("igt_entropy", 0.0))],
+    }
+    return stats

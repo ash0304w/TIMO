@@ -2,24 +2,26 @@ from typing import Dict, List
 
 import torch
 
-from .access_guard import ensure_state_safe
+from .access_guard import GuardedMapping, ensure_state_safe
 
 
 class JointStateBuilder:
-    def __init__(self, slots: List, fixed_dim: int = 64):
+    def __init__(self, slots: List, fixed_dim: int = 128):
         self.slots = slots
         self.fixed_dim = fixed_dim
 
-    def build(self, ctx: Dict, protocol):
+    def build(self, ctx: Dict, protocol, stage: int = 0):
         states = []
+        guarded_ctx = GuardedMapping(ctx, protocol=protocol, stage=f"state_stage{stage}")
         for slot in self.slots:
-            obs = slot.observe(ctx)
+            if getattr(slot, "stage", 0) != stage:
+                continue
+            obs = slot.observe(guarded_ctx)
             ensure_state_safe(protocol, obs, f"slot.observe:{slot.id}")
-            states.append(obs["stats"].flatten())
+            stats = obs["stats"].flatten().float()
+            states.append(stats)
 
-        x = torch.cat(states, dim=0).float()
+        x = torch.cat(states, dim=0) if states else torch.zeros(0)
         if x.numel() >= self.fixed_dim:
-            x = x[: self.fixed_dim]
-        else:
-            x = torch.cat([x, torch.zeros(self.fixed_dim - x.numel(), device=x.device)], dim=0)
-        return x
+            return x[: self.fixed_dim]
+        return torch.cat([x, torch.zeros(self.fixed_dim - x.numel(), device=x.device)], dim=0)

@@ -1,50 +1,34 @@
+import argparse
 import os
 import random
-import argparse
-import yaml
 
 import torch
+import yaml
 
 import clip
-from utils import *
-from models import *
+from models import APE, GDA_CLIP, TIMO, run_tip_adapter
 from unifsl_rl.config import RLConfig
-from unifsl_rl.methods.timo.adapter import TIMOAdapter
-from unifsl_rl.train import train_rl
-from unifsl_rl.infer import eval_rl, probe_rl
-
-from unifsl_rl.config import RLConfig
-from unifsl_rl.methods.timo.adapter import TIMOAdapter
-from unifsl_rl.train import train_rl
-from unifsl_rl.infer import eval_joint_exact, eval_safe_or_strict, probe_safe
-
-from unifsl_rl.config import RLConfig
-from unifsl_rl.methods.timo.adapter import TIMOAdapter
-from unifsl_rl.train import train_rl
-from unifsl_rl.infer import eval_joint_exact, eval_safe_or_strict, probe_safe
-
-from unifsl_rl.config import RLConfig
-from unifsl_rl.methods.timo.adapter import TIMOAdapter
-from unifsl_rl.train import train_rl
-from unifsl_rl.infer import eval_joint_exact, eval_safe_or_strict, probe_safe
-
-from unifsl_rl.config import RLConfig
-from unifsl_rl.methods.timo.adapter import TIMOAdapter
-from unifsl_rl.train import train_rl
-from unifsl_rl.infer import eval_joint_exact, eval_safe_or_strict, probe_safe
+from unifsl_rl.infer import eval_joint_exact, eval_pure_rl, eval_safe_or_strict, probe_pure_rl, probe_safe
+from unifsl_rl.methods import build_adapter
+from unifsl_rl.train import train_pure_rl
+from utils import image_guide_text, image_guide_text_search, load_few_shot_feature, loda_val_test_feature, save_log
 
 
 def get_arguments():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--shot', dest='shot', type=int, default=1, help='shots number')
-    parser.add_argument('--seed', dest='seed', type=int, default=1, help='seed')
-    parser.add_argument('--dbg', dest='dbg', type=float, default=0, help='debug mode')
-    parser.add_argument('--config', dest='config', help='settings of Tip-Adapter in yaml format')
+    parser.add_argument('--shot', type=int, default=1)
+    parser.add_argument('--seed', type=int, default=1)
+    parser.add_argument('--dbg', type=float, default=0)
+    parser.add_argument('--config', required=True)
+
+    parser.add_argument('--method', type=str, default='timo', choices=['timo', 'gda_clip'])
+    parser.add_argument('--backend', type=str, default='safe_rl_legacy', choices=['paper', 'joint_exact', 'safe_rl_legacy', 'pure_rl'])
+    parser.add_argument('--mode', type=str, default='eval', choices=['train', 'eval', 'probe'])
+    parser.add_argument('--ckpt', type=str, default='')
 
     parser.add_argument('--timo_mode', type=str, default='safe_rl', choices=['paper', 'joint_exact', 'safe_rl', 'strict_rl'])
     parser.add_argument('--rl_mode', type=str, default='eval', choices=['train', 'eval', 'probe'])
     parser.add_argument('--rl_ckpt', type=str, default='')
-    parser.add_argument('--save_rl_outputs', type=int, default=1)
 
     parser.add_argument('--safe_floor_mode', type=str, default='safe', choices=['paper', 'joint_exact', 'safe'])
     parser.add_argument('--require_significant_gain', type=int, default=1)
@@ -77,13 +61,22 @@ def get_arguments():
     parser.add_argument('--dump_jsonl', type=int, default=1)
     parser.add_argument('--dump_csv', type=int, default=1)
     parser.add_argument('--dump_candidate_pool', type=int, default=1)
-    args = parser.parse_args()
-    return args
+    parser.add_argument('--save_rl_outputs', type=int, default=1)
+    return parser.parse_args()
+
+
+def resolve_backend_mode(args):
+    if args.backend == 'safe_rl_legacy' and args.timo_mode in {'paper', 'joint_exact', 'safe_rl', 'strict_rl'}:
+        mode_map = {'paper': 'paper', 'joint_exact': 'joint_exact', 'safe_rl': 'safe_rl_legacy', 'strict_rl': 'safe_rl_legacy'}
+        backend = mode_map[args.timo_mode]
+        mode = args.rl_mode if backend == 'safe_rl_legacy' else args.mode
+        return backend, mode, (args.timo_mode == 'strict_rl')
+    return args.backend, args.mode, False
 
 
 def run_paper_mode(cfg):
     clip_weights_cupl_all = torch.load(cfg['cache_dir'] + "/text_weights_cupl_t_all.pt", weights_only=False)
-    cate_num, prompt_cupl_num, dim = clip_weights_cupl_all.shape
+    cate_num, _, _ = clip_weights_cupl_all.shape
     clip_weights_cupl = clip_weights_cupl_all.mean(dim=1).t()
     clip_weights_cupl = clip_weights_cupl / clip_weights_cupl.norm(dim=0, keepdim=True)
 
@@ -101,12 +94,10 @@ def run_paper_mode(cfg):
     clip_weights_IGT, matching_score = image_guide_text(cfg, clip_weights_cupl_all, image_weights, return_matching=True)
     clip_weights_IGT = clip_weights_IGT.t()
     metric = {}
-
     metric['Tip_Adapter'] = run_tip_adapter(cfg, cache_keys, cache_values, val_features, val_labels, test_features, test_labels, clip_weights_cupl)
     metric['APE'] = APE(cfg, cache_keys, cache_values, val_features, val_labels, test_features, test_labels, clip_weights_cupl)
     metric['GDA_CLIP'] = GDA_CLIP(cfg, val_features, val_labels, test_features, test_labels, clip_weights_cupl)
     metric['TIMO'] = TIMO(cfg, val_features, val_labels, test_features, test_labels, clip_weights_IGT, clip_weights_cupl_all, matching_score, grid_search=False, is_print=True)
-
     clip_weights_IGT, matching_score = image_guide_text_search(cfg, clip_weights_cupl_all, val_features, val_labels, image_weights)
     metric['TIMO_S'] = TIMO(cfg, val_features, val_labels, test_features, test_labels, clip_weights_IGT, clip_weights_cupl_all, matching_score, grid_search=True, n_quick_search=10, is_print=True)
     save_log(cfg, metric)
@@ -114,9 +105,9 @@ def run_paper_mode(cfg):
 
 def build_rl_cfg(args):
     return RLConfig(
-        timo_mode=args.timo_mode,
-        rl_mode=args.rl_mode,
-        ckpt=args.rl_ckpt,
+        timo_mode=args.backend,
+        rl_mode=args.mode,
+        ckpt=args.ckpt or args.rl_ckpt,
         save_rl_outputs=args.save_rl_outputs,
         safe_floor_mode=args.safe_floor_mode,
         require_significant_gain=args.require_significant_gain,
@@ -148,84 +139,70 @@ def build_rl_cfg(args):
     )
 
 
-def print_safe_summary(mode_name, protocol, incumbent, chosen, ckpt_path=''):
-    print(f"mode_name={mode_name}")
-    print(f"protocol={protocol}")
-    print(f"incumbent_mode={incumbent.mode_name}")
-    print(f"incumbent alpha_idx/value={incumbent.alpha_idx}/{incumbent.alpha_value}")
-    print(f"incumbent beta={incumbent.beta}")
-    print(f"incumbent gamma_idx/value={incumbent.gamma_idx}/{incumbent.gamma_value}")
-    print(f"incumbent subset summary=len:{len(incumbent.subset_indices)}")
-    print(f"chosen alpha_idx/value={chosen.alpha_idx}/{chosen.alpha_value}")
-    print(f"chosen beta={chosen.beta}")
-    print(f"chosen gamma_idx/value={chosen.gamma_idx}/{chosen.gamma_value}")
-    print(f"chosen subset indices={chosen.subset_indices}")
-    print(f"chosen source_tag={chosen.source_tag}")
-    print(f"incumbent selection_score={incumbent.selection_score}")
-    print(f"chosen selection_score={chosen.selection_score}")
-    print(f"delta vs incumbent={chosen.selection_score - incumbent.selection_score}")
-    print(f"raw accuracy={chosen.raw_accuracy}")
-    print(f"reward={(chosen.selection_score - incumbent.selection_score)}")
-    print(f"cost={chosen.cost}")
-    print(f"violation={chosen.violation}")
-    print(f"repair flag={chosen.repair_flag}")
-    print(f"ckpt path={ckpt_path}")
+def print_pure_summary(step, protocol, backend, method):
+    print(f"method={method} backend={backend} protocol={protocol}")
+    print(f"chosen alpha idx/value={step.actions.get('alpha_idx')}/{step.actions.get('alpha')}")
+    print(f"chosen beta={step.actions.get('beta')}")
+    print(f"chosen subset={step.actions.get('subset_indices')}")
+    print(f"chosen gamma idx/value={step.actions.get('gamma_idx')}/{step.actions.get('gamma')}")
+    print(f"reward={step.reward}")
+    print(f"cost={step.cost}")
+    print(f"violation={step.violation}")
+    print(f"repair flag={step.report['stage0'].repaired or step.report['stage1'].repaired}")
 
 
 def main():
     args = get_arguments()
-    assert os.path.exists(args.config)
-
     cfg = yaml.load(open(args.config, 'r'), Loader=yaml.Loader)
     cfg['shots'] = args.shot
     cfg['seed'] = args.seed
     cfg['dbg'] = args.dbg
-
-    if not os.path.exists('outputs'):
-        os.makedirs('outputs')
+    os.makedirs('outputs', exist_ok=True)
     cache_dir = os.path.join(f'./caches/{cfg["backbone"]}/{cfg["seed"]}/{cfg["dataset"]}')
     os.makedirs(cache_dir, exist_ok=True)
     cfg['cache_dir'] = cache_dir
 
-    clip_model, preprocess = clip.load(cfg['backbone'])
+    clip_model, _ = clip.load(cfg['backbone'])
     clip_model.eval()
     random.seed(cfg['seed'])
     torch.manual_seed(cfg['seed'])
 
-    if args.timo_mode == 'paper':
+    backend, mode, strict = resolve_backend_mode(args)
+    rl_cfg = build_rl_cfg(args)
+
+    if backend == 'paper':
         run_paper_mode(cfg)
         return
 
-    rl_cfg = build_rl_cfg(args)
-    adapter = TIMOAdapter(cfg, device=rl_cfg.rl_device)
+    adapter = build_adapter(args.method, cfg, device=rl_cfg.rl_device)
 
-    if args.timo_mode == 'joint_exact':
+    if backend == 'joint_exact':
         res = eval_joint_exact(adapter, rl_cfg)
         print(f"[JOINT_EXACT] alpha={res.alpha_value} beta={res.beta} gamma={res.gamma_value} score={res.selection_score}")
         return
 
-    if args.timo_mode == 'safe_rl':
-        if args.rl_mode == 'train':
-            ckpt, stats = train_rl(adapter, rl_cfg)
-            print(f"[SAFE_RL TRAIN] ckpt={ckpt} stats={stats}")
-        elif args.rl_mode == 'eval':
-            res = eval_safe_or_strict(adapter, rl_cfg, strict=False)
-            print_safe_summary('safe_rl', 'offline_eval', res['safe_inc'], res['chosen'], args.rl_ckpt)
+    if backend == 'pure_rl':
+        if mode == 'train':
+            ckpt, stats = train_pure_rl(adapter, rl_cfg)
+            print(f"[PURE_RL TRAIN] ckpt={ckpt} stats={stats}")
+        elif mode == 'eval':
+            step = eval_pure_rl(adapter, rl_cfg)
+            print_pure_summary(step, 'offline_eval', backend, args.method)
         else:
-            res = probe_safe(adapter, rl_cfg, strict=False)
-            print_safe_summary('safe_rl', 'test_time_probe', res['safe_inc'], res['chosen'], args.rl_ckpt)
+            step = probe_pure_rl(adapter, rl_cfg)
+            print_pure_summary(step, 'test_time_probe', backend, args.method)
         return
 
-    if args.timo_mode == 'strict_rl':
-        if args.rl_mode == 'train':
-            ckpt, stats = train_rl(adapter, rl_cfg)
-            print(f"[STRICT_RL TRAIN] ckpt={ckpt} stats={stats}")
-        elif args.rl_mode == 'eval':
-            res = eval_safe_or_strict(adapter, rl_cfg, strict=True)
-            print_safe_summary('strict_rl', 'strict_rl', res['safe_inc'], res['chosen'], args.rl_ckpt)
+    if backend == 'safe_rl_legacy':
+        if mode == 'train':
+            ckpt, stats = train_pure_rl(adapter, rl_cfg)
+            print(f"[LEGACY ABLATION TRAIN] ckpt={ckpt} stats={stats}")
+        elif mode == 'eval':
+            res = eval_safe_or_strict(adapter, rl_cfg, strict=strict)
+            print(f"[LEGACY {'STRICT' if strict else 'SAFE'}] chosen={res['chosen'].selection_score}")
         else:
-            res = probe_safe(adapter, rl_cfg, strict=True)
-            print_safe_summary('strict_rl', 'test_time_probe', res['safe_inc'], res['chosen'], args.rl_ckpt)
+            res = probe_safe(adapter, rl_cfg, strict=strict)
+            print(f"[LEGACY PROBE] chosen={res['chosen'].selection_score}")
 
 
 if __name__ == '__main__':
