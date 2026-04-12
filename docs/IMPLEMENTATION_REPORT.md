@@ -54,3 +54,72 @@
 
 - `gda_clip` is registered through method factory and runs with the same core coordinator/policy/state machinery.
 - Adding `gda_clip` required method-specific adapter/slots only; no changes were made to controller/policy_factory/constraints logic to enable it.
+
+## 论文原始复现路径与当前多后端路径说明
+
+### 1) 论文原始复现路径（legacy/paper）
+该路径仍然走原项目 `models.py` 中的 `Tip-Adapter/APE/GDA_CLIP/TIMO/TIMO_S` 组合流程，不经过 pure RL coordinator：
+
+```bash
+python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --backend paper --method timo
+```
+
+兼容旧参数也可触发 paper：
+
+```bash
+python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --timo_mode paper
+```
+
+### 2) joint_exact 上界/基线路径（legacy deterministic baseline）
+用于确定性上界搜索对比：
+
+```bash
+python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --backend joint_exact --method timo
+```
+
+兼容旧参数：
+
+```bash
+python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --timo_mode joint_exact
+```
+
+### 3) safe_rl / strict_rl 遗留消融路径（legacy ablation）
+该路径保留供对照，不作为默认主实现：
+
+```bash
+# safe_rl legacy
+python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --backend safe_rl_legacy --mode eval --method timo --ckpt <path>
+
+# strict_rl legacy（通过旧参数兼容）
+python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --backend safe_rl_legacy --mode eval --method timo --timo_mode strict_rl --ckpt <path>
+```
+
+### 4) pure_rl 主路径（Phase-2 hardened）
+该路径走统一核心：
+`MethodWrapper -> JointStateBuilder -> PolicyFactory -> RLCoordinator -> ConstraintEngine -> Wrapper.evaluate`
+
+```bash
+# train
+python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --backend pure_rl --mode train --method timo
+
+# eval
+python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --backend pure_rl --mode eval --method timo --ckpt <path>
+
+# probe
+python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --backend pure_rl --mode probe --method timo --ckpt <path> --rl_budget 2
+```
+
+### 5) 第二方法迁移路径（gda_clip）
+证明 method-agnostic：不改 core coordinator/policy/constraints 即可接入：
+
+```bash
+python main.py --config configs/imagenet.yaml --shot 1 --seed 1 --backend pure_rl --mode eval --method gda_clip --ckpt <path>
+```
+
+### 6) 旧参数到新参数映射
+- `timo_mode=paper` -> `backend=paper`
+- `timo_mode=joint_exact` -> `backend=joint_exact`
+- `timo_mode=safe_rl` -> `backend=safe_rl_legacy`
+- `timo_mode=strict_rl` -> `backend=safe_rl_legacy` + strict 标志
+
+因此历史脚本可继续跑，建议新脚本统一切换到 `--backend/--mode/--method`。
