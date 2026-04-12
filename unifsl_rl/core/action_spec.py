@@ -32,7 +32,8 @@ class Discrete(ActionSpec):
 
     def index_to_value(self, idx: torch.Tensor):
         idx = idx.clamp(0, self.n - 1).long()
-        return torch.tensor(self.values, device=idx.device)[idx]
+        lut = torch.tensor(self.values, device=idx.device, dtype=torch.float32)
+        return lut[idx]
 
 
 @dataclass
@@ -48,8 +49,7 @@ class Simplex(ActionSpec):
 
     def project(self, action: torch.Tensor):
         x = torch.clamp(action, min=1e-12)
-        z = x / x.sum(dim=-1, keepdim=True)
-        return z
+        return x / x.sum(dim=-1, keepdim=True)
 
 
 @dataclass
